@@ -8,6 +8,15 @@ const btnIndex = document.getElementById('btnIndex');
 const btnSearch = document.getElementById('btnSearch');
 const resultsList = document.getElementById('resultsList');
 const matchStats = document.getElementById('matchStats');
+const corpusFileInput = document.getElementById('corpusFileInput');
+const btnAskRag = document.getElementById('btnAskRag');
+const ragAnswerBox = document.getElementById('ragAnswerBox');
+
+if (window.pdfjsLib) {
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+}
+
+let lastTopMatches = [];
 
 // Telemetry
 const telemetryBadge = document.getElementById('telemetryBadge');
@@ -193,6 +202,7 @@ function executeSemanticSearch() {
 
   // Sort descending
   matches.sort((a, b) => b.score - a.score);
+  lastTopMatches = matches.filter(m => m.score > 0).slice(0, 3);
 
   const duration = (performance.now() - startTime).toFixed(2);
   calcTime.textContent = `${duration} ms`;
@@ -398,6 +408,87 @@ document.querySelectorAll('.chip').forEach(chip => {
 });
 
 // Initialize with default sample
+if (corpusFileInput) {
+  corpusFileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.name.toLowerCase().endsWith('.pdf') && window.pdfjsLib) {
+      const buf = await file.arrayBuffer();
+      const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
+      let text = '';
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const content = await page.getTextContent();
+        text += content.items.map(it => it.str).join(' ') + '\n\n';
+      }
+      corpusInput.value = text.trim();
+    } else {
+      corpusInput.value = await file.text();
+    }
+    buildVectorSpace();
+    if (queryInput.value.trim()) executeSemanticSearch();
+  });
+}
+
+if (btnAskRag) {
+  btnAskRag.addEventListener('click', async () => {
+    executeSemanticSearch();
+    const q = queryInput.value.trim();
+    if (!q || lastTopMatches.length === 0) {
+      ragAnswerBox.style.display = 'block';
+      ragAnswerBox.textContent = 'Run a query matching at least 1 corpus chunk first.';
+      return;
+    }
+    let cfg = {};
+    try { cfg = JSON.parse(localStorage.getItem('kg_ai_config') || '{}'); } catch {}
+    if (!cfg.provider || cfg.provider === 'offline') {
+      ragAnswerBox.style.display = 'block';
+      ragAnswerBox.textContent = 'Shared AI Engine is in Offline Mode. Open Krishna.OS -> AI Engine to enable local Ollama or a Cloud API key for grounded RAG answers.';
+      return;
+    }
+    btnAskRag.textContent = 'Synthesizing...';
+    btnAskRag.disabled = true;
+    ragAnswerBox.style.display = 'block';
+    ragAnswerBox.textContent = 'Generating grounded answer from Top-K retrieved chunks...';
+    const contextStr = lastTopMatches.map(m => `[Chunk #${m.chunk.id} | sim=${m.score.toFixed(3)}]\n${m.chunk.text}`).join('\n\n');
+    const ragPrompt = `Answer the user's question strictly using the retrieved chunks below and cite [Chunk #X].\n\nContext:\n${contextStr}\n\nQuestion: ${q}`;
+    try {
+      let ans = '';
+      if (cfg.provider === 'ollama') {
+        const res = await fetch(cfg.endpoint || 'http://localhost:11434/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: cfg.model || 'qwen2.5:3b', messages: [{ role: 'user', content: ragPrompt }], stream: false })
+        });
+        const d = await res.json();
+        ans = d.message?.content || d.response || '';
+      } else if (cfg.provider === 'gemini') {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${cfg.model || 'gemini-4-hydrogen'}:generateContent?key=${cfg.apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: ragPrompt }] }] })
+        });
+        const d = await res.json();
+        ans = d.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      } else if (cfg.provider === 'groq' || cfg.provider === 'openai') {
+        const res = await fetch(cfg.endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.apiKey}` },
+          body: JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: ragPrompt }] })
+        });
+        const d = await res.json();
+        ans = d.choices?.[0]?.message?.content || '';
+      }
+      ragAnswerBox.textContent = ans.trim() || 'Empty AI response.';
+    } catch (err) {
+      ragAnswerBox.textContent = `RAG synthesis failed: ${err.message}`;
+    } finally {
+      btnAskRag.textContent = 'Ask AI (RAG) ✨';
+      btnAskRag.disabled = false;
+    }
+  });
+}
+
 corpusInput.value = SAMPLES.ai;
 buildVectorSpace();
 queryInput.value = 'How does quantization affect inference latency?';
