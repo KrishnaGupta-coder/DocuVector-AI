@@ -9,6 +9,7 @@ const btnSearch = document.getElementById('btnSearch');
 const resultsList = document.getElementById('resultsList');
 const matchStats = document.getElementById('matchStats');
 const corpusFileInput = document.getElementById('corpusFileInput');
+const btnNeuralMode = document.getElementById('btnNeuralMode');
 const btnAskRag = document.getElementById('btnAskRag');
 const ragAnswerBox = document.getElementById('ragAnswerBox');
 
@@ -17,6 +18,8 @@ if (window.pdfjsLib) {
 }
 
 let lastTopMatches = [];
+let neuralExtractor = null;
+let useNeuralMode = false;
 
 // Telemetry
 const telemetryBadge = document.getElementById('telemetryBadge');
@@ -78,8 +81,13 @@ function tokenize(text) {
     .filter(t => t.length > 2 && !STOPWORDS.has(t));
 }
 
-// 1. Ingest & Chunk Document
-function buildVectorSpace() {
+// 1. Ingest & Chunk Document (supports Instant TF-IDF & 384D Transformers.js Neural Embeddings)
+async function embedNeural(text) {
+  const output = await neuralExtractor(text, { pooling: 'mean', normalize: true });
+  return output.data;
+}
+
+async function buildVectorSpace() {
   const text = corpusInput.value.trim();
   if (!text) {
     documentChunks = [];
@@ -99,6 +107,21 @@ function buildVectorSpace() {
     text: p.trim(),
     tokens: tokenize(p)
   }));
+
+  if (useNeuralMode && neuralExtractor) {
+    chunkVectors = [];
+    for (const chunk of documentChunks) {
+      chunkVectors.push(await embedNeural(chunk.text));
+    }
+    const duration = Math.round(performance.now() - startTime);
+    updateCorpusStats();
+    vocabSize.textContent = '384D Dense';
+    totalChunks.textContent = `${documentChunks.length}`;
+    telemetryBadge.textContent = 'NEURAL: 384D (all-MiniLM-L6-v2)';
+    calcTime.textContent = `${duration} ms`;
+    drawVectorSpace([]);
+    return;
+  }
 
   // Build Unified Vocabulary
   const vocabMap = new Map();
@@ -182,13 +205,13 @@ function cosineSimilarity(vecA, vecB) {
 }
 
 // Perform Semantic Query Search
-function executeSemanticSearch() {
+async function executeSemanticSearch() {
   const query = queryInput.value.trim();
   if (!query || chunkVectors.length === 0) return;
 
   const startTime = performance.now();
   const queryTokens = tokenize(query);
-  const queryVector = vectorize(queryTokens);
+  const queryVector = (useNeuralMode && neuralExtractor) ? await embedNeural(query) : vectorize(queryTokens);
 
   // Compute similarities
   const matches = documentChunks.map((chunk, idx) => {
@@ -408,6 +431,33 @@ document.querySelectorAll('.chip').forEach(chip => {
 });
 
 // Initialize with default sample
+if (btnNeuralMode) {
+  btnNeuralMode.addEventListener('click', async () => {
+    if (neuralExtractor) {
+      useNeuralMode = !useNeuralMode;
+      btnNeuralMode.textContent = useNeuralMode ? 'Neural 384D: ON 🧠' : 'Neural 384D: OFF (TF-IDF)';
+      await buildVectorSpace();
+      if (queryInput.value.trim()) await executeSemanticSearch();
+      return;
+    }
+    btnNeuralMode.textContent = 'Downloading MiniLM (~23MB)...';
+    btnNeuralMode.disabled = true;
+    try {
+      const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2');
+      neuralExtractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'q8' });
+      useNeuralMode = true;
+      btnNeuralMode.textContent = 'Neural 384D: ON 🧠';
+      await buildVectorSpace();
+      if (queryInput.value.trim()) await executeSemanticSearch();
+    } catch (err) {
+      alert(`Neural model load failed (${err.message}). Keeping instant TF-IDF mode.`);
+      btnNeuralMode.textContent = 'Load Neural 384D 🧠';
+    } finally {
+      btnNeuralMode.disabled = false;
+    }
+  });
+}
+
 if (corpusFileInput) {
   corpusFileInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
@@ -425,14 +475,14 @@ if (corpusFileInput) {
     } else {
       corpusInput.value = await file.text();
     }
-    buildVectorSpace();
-    if (queryInput.value.trim()) executeSemanticSearch();
+    await buildVectorSpace();
+    if (queryInput.value.trim()) await executeSemanticSearch();
   });
 }
 
 if (btnAskRag) {
   btnAskRag.addEventListener('click', async () => {
-    executeSemanticSearch();
+    await executeSemanticSearch();
     const q = queryInput.value.trim();
     if (!q || lastTopMatches.length === 0) {
       ragAnswerBox.style.display = 'block';

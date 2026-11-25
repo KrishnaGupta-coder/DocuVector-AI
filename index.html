@@ -52,7 +52,8 @@
           <textarea id="corpusInput" placeholder="Paste any text, notes, research paper, or technical report here to index into the vector space..." rows="7"></textarea>
           <div class="input-meta">
             <span id="corpusStats">0 words &bull; 0 chunks</span>
-            <div style="display:flex;gap:0.45rem;align-items:center;">
+            <div style="display:flex;gap:0.45rem;align-items:center;flex-wrap:wrap;">
+              <button id="btnNeuralMode" class="btn-sm" title="Switch to dense 384D Transformer embeddings">Load Neural 384D 🧠</button>
               <label class="btn-sm" style="cursor:pointer;">
                 Upload PDF / TXT
                 <input type="file" id="corpusFileInput" accept=".pdf,.txt,.md" hidden />
